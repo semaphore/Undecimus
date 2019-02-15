@@ -55,6 +55,7 @@
 #include "find_port.h"
 #include "v1ntex_offsets.h"
 #include "v1ntex_exploit.h"
+#include "v3ntex_exploit.h"
 
 @interface NSUserDefaults ()
 - (id)objectForKey:(id)arg1 inDomain:(id)arg2;
@@ -622,12 +623,27 @@ bool load_prefs(prefs_t *prefs, NSDictionary *defaults) {
     return true;
 }
 
-kern_return_t v1ntex_callback(task_t kernel_task, kptr_t kbase, void *data) {
+kern_return_t exploit_callback_common(task_t kernel_task, kptr_t kbase, void *data) {
     prepare_for_rw_with_fake_tfp0(kernel_task);
     offsets_init();
     kernel_base = kbase;
     kernel_slide = (kernel_base - KERNEL_SEARCH_ADDRESS);
     return KERN_SUCCESS;
+}
+
+kern_return_t v1ntex_callback(task_t kernel_task, kptr_t kbase, void *data) {
+    return exploit_callback_common(kernel_task, kbase, data);
+}
+
+kern_return_t v3ntex_callback(task_t tfp0, kptr_t kbase, void *data) {
+    return exploit_callback_common(tfp0, kbase, data);
+}
+
+void waitFor(int seconds) {
+    for (int i = 0; i <= seconds; i++) {
+        LOG("Waiting (%d/%d)", i, seconds);
+        sleep(1);
+    }
 }
 
 void jailbreak()
@@ -682,7 +698,7 @@ void jailbreak()
         
         LOG("Exploiting kernel_task...");
         SETMESSAGE(NSLocalizedString(@"Failed to exploit kernel_task.", nil));
-        int exploit_success = false;
+        bool exploit_success = false;
         mach_port_t persisted_kernel_task_port = MACH_PORT_NULL;
         struct task_dyld_info dyld_info = { 0 };
         mach_msg_type_number_t count = TASK_DYLD_INFO_COUNT;
@@ -779,6 +795,15 @@ void jailbreak()
                     }
                     break;
                 }
+                case v3ntex_exploit: {
+                    if (v3ntex(v3ntex_callback, NULL) == ERR_SUCCESS &&
+                        MACH_PORT_VALID(tfp0) &&
+                        ISADDR(kernel_base) &&
+                        ISADDR(kernel_slide)) {
+                        exploit_success = true;
+                    }
+                    break;
+                }
                 default: {
                     NOTICE(NSLocalizedString(@"No exploit selected.", nil), false, false);
                     STATUS(NSLocalizedString(@"Jailbreak", nil), true, true);
@@ -834,9 +859,11 @@ void jailbreak()
         PF(shenanigans);
         PF(lck_mtx_lock);
         PF(lck_mtx_unlock);
-        PF(vnode_get_snapshot);
-        PF(fs_lookup_snapshot_metadata_by_name_and_return_name);
-        PF(apfs_jhash_getvnode);
+        if (kCFCoreFoundationVersionNumber >= 1535.12) {
+            PF(vnode_get_snapshot);
+            PF(fs_lookup_snapshot_metadata_by_name_and_return_name);
+            PF(apfs_jhash_getvnode);
+        }
 #undef PF
         found_offsets = true;
         LOG("Successfully found offsets.");
@@ -1421,7 +1448,7 @@ void jailbreak()
         clean_file("/jb/libjailbreak.dylib");
         
         LOG("Successfully copied over our resources to RootFS.");
-        INSERTSTATUS(NSLocalizedString(@"Copied over out resources to RootFS.\n", nil));
+        INSERTSTATUS(NSLocalizedString(@"Copied over our resources to RootFS.\n", nil));
     }
     
     UPSTAGE();
@@ -1463,7 +1490,9 @@ void jailbreak()
         dictionary[@"Shenanigans"] = ADDRSTRING(GETOFFSET(shenanigans));
         dictionary[@"LckMtxLock"] = ADDRSTRING(GETOFFSET(lck_mtx_lock));
         dictionary[@"LckMtxUnlock"] = ADDRSTRING(GETOFFSET(lck_mtx_unlock));
-        dictionary[@"Strlen"] = ADDRSTRING(GETOFFSET(strlen));
+        dictionary[@"VnodeGetSnapshot"] = ADDRSTRING(GETOFFSET(vnode_get_snapshot));
+        dictionary[@"FsLookupSnapshotMetadataByNameAndReturnName"] = ADDRSTRING(GETOFFSET(fs_lookup_snapshot_metadata_by_name_and_return_name));
+        dictionary[@"APFSJhashGetVnode"] = ADDRSTRING(GETOFFSET(apfs_jhash_getvnode));
         if (![[NSMutableDictionary dictionaryWithContentsOfFile:offsetsFile] isEqual:dictionary]) {
             // Log offsets.
             
@@ -1992,9 +2021,13 @@ void jailbreak()
     }
 out:
     STATUS(NSLocalizedString(@"Jailbroken", nil), false, false);
-    showAlert(@"Jailbreak Completed", [NSString stringWithFormat:@"%@\n\n%@\n%@", NSLocalizedString(@"Jailbreak Completed with Status:", nil), status, NSLocalizedString(@"The app will now exit.", nil)], true, false);
+    showAlert(@"Jailbreak Completed", [NSString stringWithFormat:@"%@\n\n%@\n%@", NSLocalizedString(@"Jailbreak Completed with Status:", nil), status, NSLocalizedString(prefs.exploit == v3ntex_exploit ? @"The device will now respring." : @"The app will now exit.", nil)], true, false);
     if (sharedController.canExit) {
-        exit(EXIT_SUCCESS);
+        if (prefs.exploit == v3ntex_exploit) {
+            _assert(restartSpringBoard(), message, true);
+        } else {
+            exit(EXIT_SUCCESS);
+        }
     }
     sharedController.canExit = YES;
 #undef INSERTSTATUS

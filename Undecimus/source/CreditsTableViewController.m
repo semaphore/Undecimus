@@ -87,7 +87,7 @@
 }
 
 -(IBAction)tappedOnRob:(id)sender{
-    [[UIApplication sharedApplication] openURL:[CreditsTableViewController getURLForUserName:@"Rob_Coleman123"] options:@{} completionHandler:nil];
+    [[UIApplication sharedApplication] openURL:[CreditsTableViewController getURLForUserName:@"AyyItzRob"] options:@{} completionHandler:nil];
 }
 
 -(IBAction)tappedOnMidnightChip:(id)sender{
@@ -156,6 +156,10 @@
 
 -(IBAction)tappedOnMiscMisty:(id)sender{
     [[UIApplication sharedApplication] openURL:[CreditsTableViewController getURLForUserName:@"MiscMisty"] options:@{} completionHandler:nil];
+}
+
+-(IBAction)tappedOnSemaphore:(id)sender{
+    [[UIApplication sharedApplication] openURL:[CreditsTableViewController getURLForUserName:@"notcom"] options:@{} completionHandler:nil];
 }
 
 -(IBAction)tappedOnLibimobiledevice:(id)sender{
