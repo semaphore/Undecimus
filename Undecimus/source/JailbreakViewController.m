@@ -32,6 +32,7 @@
 #import <snappy.h>
 #import <inject.h>
 #include <libgrabkernel/libgrabkernel.h>
+#include <sched.h>
 #import "JailbreakViewController.h"
 #include "KernelStructureOffsets.h"
 #include "empty_list_sploit.h"
@@ -625,7 +626,6 @@ bool load_prefs(prefs_t *prefs, NSDictionary *defaults) {
 
 kern_return_t exploit_callback_common(task_t kernel_task, kptr_t kbase, void *data) {
     prepare_for_rw_with_fake_tfp0(kernel_task);
-    offsets_init();
     kernel_base = kbase;
     kernel_slide = (kernel_base - KERNEL_SEARCH_ADDRESS);
     return KERN_SUCCESS;
@@ -640,7 +640,7 @@ kern_return_t v3ntex_callback(task_t tfp0, kptr_t kbase, void *data) {
 }
 
 void waitFor(int seconds) {
-    for (int i = 0; i <= seconds; i++) {
+    for (int i = 1; i <= seconds; i++) {
         LOG("Waiting (%d/%d)", i, seconds);
         sleep(1);
     }
@@ -711,7 +711,6 @@ void jailbreak()
             ISADDR((persisted_kernel_base = dyld_info.all_image_info_addr)) &&
             ISADDR((persisted_kernel_slide = dyld_info.all_image_info_size))) {
             prepare_for_rw_with_fake_tfp0(persisted_kernel_task_port);
-            offsets_init();
             kernel_base = persisted_kernel_base;
             kernel_slide = persisted_kernel_slide;
             usedPersistedKernelTaskPort = true;
@@ -750,7 +749,6 @@ void jailbreak()
                 }
                 case voucher_swap_exploit: {
                     voucher_swap();
-                    offsets_init();
                     prepare_for_rw_with_fake_tfp0(kernel_task_port);
                     if (MACH_PORT_VALID(tfp0) &&
                         ISADDR((kernel_base = find_kernel_base())) &&
@@ -899,8 +897,12 @@ void jailbreak()
         Shenanigans = ReadKernel64(GETOFFSET(shenanigans));
         LOG("Shenanigans = " ADDR, Shenanigans);
         _assert(ISADDR(Shenanigans), message, true);
+        if (Shenanigans != kernelCredAddr) {
+            LOG("Detected corrupted shenanigans pointer.");
+            Shenanigans = kernelCredAddr;
+        }
         WriteKernel64(GETOFFSET(shenanigans), ShenanigansPatch);
-        myOriginalCredAddr = give_creds_to_process_at_addr(myProcAddr, kernelCredAddr);
+        myOriginalCredAddr = myCredAddr = give_creds_to_process_at_addr(myProcAddr, kernelCredAddr);
         LOG("myOriginalCredAddr = " ADDR, myOriginalCredAddr);
         _assert(ISADDR(myOriginalCredAddr), message, true);
         _assert(setuid(0) == ERR_SUCCESS, message, true);
@@ -1017,7 +1019,7 @@ void jailbreak()
         NSData *fileData = [[NSString stringWithFormat:@(ADDR "\n"), kernel_slide] dataUsingEncoding:NSUTF8StringEncoding];
         if (![[NSData dataWithContentsOfFile:file] isEqual:fileData]) {
             _assert(clean_file(file.UTF8String), message, true);
-            _assert(create_file_data(file.UTF8String, 0, 0644, fileData), message, false);
+            _assert(create_file_data(file.UTF8String, 0, 0644, fileData), message, true);
         }
         LOG("Successfully logged slide.");
         INSERTSTATUS(NSLocalizedString(@"Logged slide.\n", nil));
@@ -1055,6 +1057,10 @@ void jailbreak()
             for (NSString *path in array) {
                 ensure_symlink("/dev/null", path.UTF8String);
             }
+            _assert(modifyPlist(@"/var/mobile/Library/Preferences/com.apple.Preferences.plist", ^(id plist) {
+                plist[@"kBadgedForSoftwareUpdateKey"] = @NO;
+                plist[@"kBadgedForSoftwareUpdateJumpOnceKey"] = @NO;
+            }), message, true);
             LOG("Successfully disabled Auto Updates.");
             INSERTSTATUS(NSLocalizedString(@"Disabled Auto Updates.\n", nil));
         } else {
@@ -1065,6 +1071,10 @@ void jailbreak()
             for (NSString *path in array) {
                 ensure_directory(path.UTF8String, 0, 0755);
             }
+            _assert(modifyPlist(@"/var/mobile/Library/Preferences/com.apple.Preferences.plist", ^(id plist) {
+                plist[@"kBadgedForSoftwareUpdateKey"] = @YES;
+                plist[@"kBadgedForSoftwareUpdateJumpOnceKey"] = @YES;;
+            }), message, true);
             INSERTSTATUS(NSLocalizedString(@"Enabled Auto Updates.\n", nil));
         }
     }
@@ -1119,7 +1129,7 @@ void jailbreak()
             LOG("Mounting system snapshot...");
             SETMESSAGE(NSLocalizedString(@"Unable to mount system snapshot.", nil));
             _assert(!is_mountpoint("/var/MobileSoftwareUpdate/mnt1"),
-                    NSLocalizedString(@"RootFS already mounted, delete OTA file from Settings - Storage if present and reboot", nil), true);
+                    NSLocalizedString(@"RootFS already mounted, delete OTA file from Settings - Storage if present and reboot.", nil), true);
             const char *systemSnapshotMountPoint = "/private/var/tmp/jb/mnt1";
             if (is_mountpoint(systemSnapshotMountPoint)) {
                 _assert(unmount(systemSnapshotMountPoint, MNT_FORCE) == ERR_SUCCESS, message, true);
@@ -1141,7 +1151,7 @@ void jailbreak()
             // Rename system snapshot.
             
             LOG("Renaming system snapshot...");
-            SETMESSAGE(NSLocalizedString(@"Unable to rename system snapshot.", nil));
+            SETMESSAGE(NSLocalizedString(@"Unable to rename system snapshot. Delete OTA file from Settings - Storage if present and reboot.", nil));
             rootfd = open(systemSnapshotMountPoint, O_RDONLY);
             _assert(rootfd > 0, message, true);
             snapshots = snapshot_list(rootfd);
@@ -1152,6 +1162,9 @@ void jailbreak()
             }
             free(snapshots);
             snapshots = NULL;
+            const char *test_snapshot = "test-snapshot";
+            _assert(fs_snapshot_create(rootfd, test_snapshot, 0) == ERR_SUCCESS, message, true);
+            _assert(fs_snapshot_delete(rootfd, test_snapshot, 0) == ERR_SUCCESS, message, true);
             char *systemSnapshot = copySystemSnapshot();
             _assert(systemSnapshot != NULL, message, true);
             uint64_t system_snapshot_vnode = 0;
@@ -1360,11 +1373,10 @@ void jailbreak()
             
             LOG("Disallowing SpringBoard to show non-default system apps...");
             SETMESSAGE(NSLocalizedString(@"Failed to disallow SpringBoard to show non-default system apps.", nil));
-            NSString *SpringBoardPreferencesFile = @"/var/mobile/Library/Preferences/com.apple.springboard.plist";
-            NSString *SpringBoardShowNonDefaultSystemAppsKey = @"SBShowNonDefaultSystemApps";
-            _assert(modifyPlist(SpringBoardPreferencesFile, ^(id plist) {
-                plist[SpringBoardShowNonDefaultSystemAppsKey] = @NO;
+            _assert(modifyPlist(@"/var/mobile/Library/Preferences/com.apple.springboard.plist", ^(id plist) {
+                plist[@"SBShowNonDefaultSystemApps"] = @NO;
             }), message, true);
+            LOG("Successfully disallowed SpringBoard to show non-default system apps.");
             
             // Disable RootFS Restore.
             
@@ -1387,8 +1399,19 @@ void jailbreak()
         }
     }
     
-    if (kCFCoreFoundationVersionNumber >= 1535.12) {
-        goto out;
+    
+    UPSTAGE();
+    
+    {
+        // Drop kernel credentials.
+        
+        LOG("Dropping kernel credentials...");
+        SETMESSAGE(NSLocalizedString(@"Failed to drop kernel credentials.", nil));
+        give_creds_to_process_at_addr(myProcAddr, myOriginalCredAddr);
+        WriteKernel64(GETOFFSET(shenanigans), Shenanigans);
+        WriteKernel64(myCredAddr + koffset(KSTRUCT_OFFSET_UCRED_CR_LABEL), ReadKernel64(kernelCredAddr + koffset(KSTRUCT_OFFSET_UCRED_CR_LABEL)));
+        WriteKernel64(myCredAddr + koffset(KSTRUCT_OFFSET_UCRED_CR_UID), 0);
+        LOG("Successfully dropped kernel credentials.");
     }
     
     UPSTAGE();
@@ -1400,6 +1423,9 @@ void jailbreak()
         SETMESSAGE(NSLocalizedString(@"Failed to copy over our resources to RootFS.", nil));
         
         _assert(chdir("/") == ERR_SUCCESS, message, true);
+        
+        // Uninstall RootLessJB if it is found to prevent conflicts with dpkg.
+        _assert(uninstallRootLessJB(), message, true);
         
         needSubstrate = ( needStrap ||
                          (access("/usr/libexec/substrate", F_OK) != ERR_SUCCESS) ||
@@ -1418,7 +1444,7 @@ void jailbreak()
             [debsToInstall addObject:substrateDeb];
         }
         
-        NSArray *resourcesPkgs = resolveDepsForPkg(@"jailbreak-resources", true);
+        NSArray *resourcesPkgs = [@[@"com.ps.letmeblock", @"com.parrotgeek.nobetaalert"] arrayByAddingObjectsFromArray:resolveDepsForPkg(@"jailbreak-resources", true)];
         _assert(resourcesPkgs != nil, message, true);
         NSMutableArray *pkgsToRepair = [NSMutableArray new];
         LOG("Resource Pkgs: \"%@\".", resourcesPkgs);
@@ -1430,6 +1456,10 @@ void jailbreak()
                 LOG("Pkg \"%@\" verified.", pkg);
             } else {
                 LOG(@"Need to repair \"%@\".", pkg);
+                if ([pkg isEqualToString:@"signing-certificate"]) {
+                    // Hack to make sure it catches the Depends: version if it's already installed
+                    [debsToInstall addObject:debForPkg(@"jailbreak-resources")];
+                }
                 [pkgsToRepair addObject:pkg];
             }
         }
@@ -1440,8 +1470,6 @@ void jailbreak()
             _assert(extractDebs(debsToRepair), message, true);
             [debsToInstall addObjectsFromArray:debsToRepair];
         }
-        
-        _assert(chdir("/jb") == ERR_SUCCESS, message, true);
         
         // These don't need to lay around
         clean_file("/Library/LaunchDaemons/jailbreakd.plist");
@@ -1465,6 +1493,7 @@ void jailbreak()
         if (!skipSubstrate) {
             resources = [@[@"/usr/libexec/substrate"] arrayByAddingObjectsFromArray:resources];
         }
+        resources = [@[@"/usr/libexec/substrated"] arrayByAddingObjectsFromArray:resources];
         _assert(injectTrustCache(resources, GETOFFSET(trustcache)) == ERR_SUCCESS, message, true);
         LOG("Successfully injected trust cache.");
         INSERTSTATUS(NSLocalizedString(@"Injected trust cache.\n", nil));
@@ -1518,15 +1547,13 @@ void jailbreak()
         _assert(ensure_directory("/var/lib", 0, 0755), message, true);
 
         // Make sure dpkg is not corrupted
-        NSFileManager *fm = [NSFileManager defaultManager];
-        BOOL isDir;
-        if ([fm fileExistsAtPath:@"/var/lib/dpkg" isDirectory:&isDir] && isDir) {
-            if ([fm fileExistsAtPath:@"/Library/dpkg" isDirectory:&isDir] && isDir) {
+        if (is_directory("/var/lib/dpkg")) {
+            if (is_directory("/Library/dpkg")) {
                 LOG(@"Removing /var/lib/dpkg...");
-                _assert([fm removeItemAtPath:@"/var/lib/dpkg" error:nil], message, true);
+                _assert(clean_file("/var/lib/dpkg"), message, true);
             } else {
                 LOG(@"Moving /var/lib/dpkg to /Library/dpkg...");
-                _assert([fm moveItemAtPath:@"/var/lib/dpkg" toPath:@"/Library/dpkg" error:nil], message, true);
+                _assert([[NSFileManager defaultManager] moveItemAtPath:@"/var/lib/dpkg" toPath:@"/Library/dpkg" error:nil], message, true);
             }
         }
         
@@ -1600,7 +1627,7 @@ void jailbreak()
         
         if (needStrap || !pkgIsConfigured("firmware")) {
             LOG("Extracting Cydia...");
-            if (![[NSFileManager defaultManager] fileExistsAtPath:@"/usr/libexec/cydia/firmware.sh"] || !pkgIsConfigured("cydia")) {
+            if (access("/usr/libexec/cydia/firmware.sh", F_OK) != ERR_SUCCESS || !pkgIsConfigured("cydia")) {
                 NSArray *fwDebs = debsForPkgs(@[@"cydia", @"cydia-lproj", @"darwintools", @"uikittools", @"system-cmds"]);
                 _assert(fwDebs != nil, message, true);
                 _assert(installDebs(fwDebs, true), message, true);
@@ -1691,6 +1718,7 @@ void jailbreak()
         
         // Make sure everything's at least as new as what we bundled
         _assert(aptUpgrade(), message, true);
+        
         clean_file("/jb/tar");
         clean_file("/jb/lzma");
         clean_file("/jb/substrate.tar.lzma");
@@ -1698,24 +1726,26 @@ void jailbreak()
         clean_file("/.bootstrapped_electra");
         clean_file("/usr/lib/libjailbreak.dylib");
 
-        _assert(chdir("/jb") == ERR_SUCCESS, message, true);
         LOG("Successfully extracted bootstrap.");
         
         INSERTSTATUS(NSLocalizedString(@"Extracted Bootstrap.\n", nil));
+        
+        if (needStrap) {
+            NOTICE(NSLocalizedString(@"Bootstrap has been successfully extracted. The device will now be restarted.", nil), true, false);
+            _assert(reboot(RB_QUICK) == ERR_SUCCESS, message, true);
+        }
     }
     
     UPSTAGE();
     
     {
-        if (access("/.cydia_no_stash", F_OK) != ERR_SUCCESS) {
-            // Disable stashing.
-            
-            LOG("Disabling stashing...");
-            SETMESSAGE(NSLocalizedString(@"Failed to disable stashing.", nil));
-            _assert(create_file("/.cydia_no_stash", 0, 0644), message, true);
-            LOG("Successfully disabled stashing.");
-            INSERTSTATUS(NSLocalizedString(@"Disabled Stashing.\n", nil));
-        }
+        // Disable stashing.
+        
+        LOG("Disabling stashing...");
+        SETMESSAGE(NSLocalizedString(@"Failed to disable stashing.", nil));
+        _assert(ensure_file("/.cydia_no_stash", 0, 0644), message, true);
+        LOG("Successfully disabled stashing.");
+        INSERTSTATUS(NSLocalizedString(@"Disabled Stashing.\n", nil));
     }
     
     UPSTAGE();
@@ -1725,10 +1755,8 @@ void jailbreak()
         
         LOG("Allowing SpringBoard to show non-default system apps...");
         SETMESSAGE(NSLocalizedString(@"Failed to allow SpringBoard to show non-default system apps.", nil));
-        NSString *SpringBoardPreferencesFile = @"/var/mobile/Library/Preferences/com.apple.springboard.plist";
-        NSString *SpringBoardShowNonDefaultSystemAppsKey = @"SBShowNonDefaultSystemApps";
-        _assert(modifyPlist(SpringBoardPreferencesFile, ^(id plist) {
-            plist[SpringBoardShowNonDefaultSystemAppsKey] = @YES;
+        _assert(modifyPlist(@"/var/mobile/Library/Preferences/com.apple.springboard.plist", ^(id plist) {
+            plist[@"SBShowNonDefaultSystemApps"] = @YES;
         }), message, true);
         LOG("Successfully allowed SpringBoard to show non-default system apps.");
         INSERTSTATUS(NSLocalizedString(@"Allowed SpringBoard to show non-default system apps.\n", nil));
@@ -1861,7 +1889,7 @@ void jailbreak()
             // Remove Electra's Cydia Upgrade Helper.
             LOG("Removing Electra's Cydia Upgrade Helper...");
             SETMESSAGE(NSLocalizedString(@"Failed to remove Electra's Cydia Upgrade Helper.", nil));
-            _assert(removePkg("cydia-upgrade-helper", true), message, false);
+            _assert(removePkg("cydia-upgrade-helper", true), message, true);
             if (!prefs.install_cydia) {
                 prefs.install_cydia = true;
                 _assert(modifyPlist(prefsFile, ^(id plist) {
@@ -1970,7 +1998,7 @@ void jailbreak()
     UPSTAGE();
     
     {
-        if (prefs.run_uicache) {
+        if (prefs.run_uicache || !canOpen("cydia://")) {
             // Run uicache.
             
             LOG("Running uicache...");
@@ -1981,7 +2009,6 @@ void jailbreak()
                 plist[K_REFRESH_ICON_CACHE] = @NO;
             }), message, true);
             LOG("Successfully ran uicache.");
-            
             INSERTSTATUS(NSLocalizedString(@"Ran uicache.\n", nil));
         }
     }
@@ -1989,14 +2016,18 @@ void jailbreak()
     UPSTAGE();
     
     {
-        // Flush preference cache.
-        
-        LOG("Flushing preference cache...");
-        SETMESSAGE(NSLocalizedString(@"Failed to flush preference cache.", nil));
-        _assert(runCommand("/bin/launchctl", "stop", "com.apple.cfprefsd.xpc.daemon", NULL) == ERR_SUCCESS, message, true);
-        LOG("Successfully flushed preference cache.");
-        INSERTSTATUS(NSLocalizedString(@"Flushed preference cache.\n", nil));
+        if (!(prefs.load_tweaks && prefs.reload_system_daemons)) {
+            // Flush preference cache.
+            
+            LOG("Flushing preference cache...");
+            SETMESSAGE(NSLocalizedString(@"Failed to flush preference cache.", nil));
+            _assert(runCommand("/bin/launchctl", "stop", "com.apple.cfprefsd.xpc.daemon", NULL) == ERR_SUCCESS, message, true);
+            LOG("Successfully flushed preference cache.");
+            INSERTSTATUS(NSLocalizedString(@"Flushed preference cache.\n", nil));
+        }
     }
+    
+    waitFor(2); // Don't remove this
     
     UPSTAGE();
     
@@ -2005,15 +2036,20 @@ void jailbreak()
             // Load Tweaks.
             
             LOG("Loading Tweaks...");
-            SETMESSAGE(NSLocalizedString(@"Failed to run ldrestart", nil));
+            SETMESSAGE(NSLocalizedString(@"Failed to load tweaks.", nil));
             if (prefs.reload_system_daemons) {
                 rv = system("nohup bash -c \""
+                             "sleep 1 ;"
                              "launchctl unload /System/Library/LaunchDaemons/com.apple.backboardd.plist && "
                              "ldrestart ;"
                              "launchctl load /System/Library/LaunchDaemons/com.apple.backboardd.plist"
-                             "\" 2>&1 >/dev/null &");
+                             "\" >/dev/null 2>&1 &");
             } else {
-                rv = system("launchctl stop com.apple.backboardd");
+                rv = system("nohup bash -c \""
+                             "sleep 1 ;"
+                             "launchctl stop com.apple.backboardd ;"
+                             "launchctl stop com.apple.mDNSResponder"
+                             "\" >/dev/null 2>&1 &");
             }
             _assert(WEXITSTATUS(rv) == ERR_SUCCESS, message, true);
             LOG("Successfully loaded Tweaks.");
@@ -2070,7 +2106,9 @@ out:
         STATUS(NSLocalizedString(@"Unsupported", nil), false, true);
     }
     if (bundledResources == nil) {
-        showAlert(NSLocalizedString(@"Error", nil), NSLocalizedString(@"Bundled Resources version is missing. This build is invalid.", nil), false, false);
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0ul), ^{
+            showAlert(NSLocalizedString(@"Error", nil), NSLocalizedString(@"Bundled Resources version is missing. This build is invalid.", nil), false, false);
+        });
     }
 }
 

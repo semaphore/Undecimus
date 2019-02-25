@@ -10,6 +10,7 @@
 #import <sys/sysctl.h>
 #import <Foundation/Foundation.h>
 #import <CommonCrypto/CommonDigest.h>
+#import <magic.h>
 #import <spawn.h>
 #include <copyfile.h>
 #include <common.h>
@@ -17,13 +18,43 @@
 #include <sys/utsname.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <MobileGestalt.h>
+#import <inject.h>
+#include <UIKit/UIKit.h>
+#include <SystemConfiguration/SystemConfiguration.h>
 #import "ArchiveFile.h"
 #import "utils.h"
+#import "KernelUtilities.h"
 
 extern char **environ;
 int logfd=-1;
 
 NSData *lastSystemOutput=nil;
+void injectDir(NSString *dir) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSMutableArray *toInject = [NSMutableArray new];
+    magic_t cookie = magic_open(MAGIC_MIME_TYPE);
+    NSString *magicFile = pathForResource(@"macho.mgc");
+    if (cookie && magic_load(cookie, magicFile.UTF8String)==0) {
+        const char *magic=NULL;
+        for (NSString *filename in [fm contentsOfDirectoryAtPath:dir error:nil]) {
+            NSString *file = [dir stringByAppendingPathComponent:filename];
+            if ((magic = magic_file(cookie, file.UTF8String)))
+            {
+                if (strcmp(magic, "application/x-mach-binary")==0) {
+                    [toInject addObject:file];
+                }
+            }
+        }
+    } else {
+        LOG("Error opening or loading magic");
+    }
+    magic_close(cookie);
+    LOG("Injecting %lu files for %@", (unsigned long)toInject.count, dir);
+    if (toInject.count > 0) {
+        injectTrustCache(toInject, GETOFFSET(trustcache));
+    }
+}
 
 int sha1_to_str(const unsigned char *hash, size_t hashlen, char *buf, size_t buflen)
 {
@@ -230,7 +261,40 @@ bool extractDeb(NSString *debPath) {
     dispatch_async(extractionQueue, ^{
         [deb extractFileNum:3 toFd:pipe.fileHandleForWriting.fileDescriptor];
     });
-    return [tar extractToPath:@"/"];
+    bool result = [tar extractToPath:@"/"];
+    if ((kCFCoreFoundationVersionNumber >= 1535.12) && result) {
+        chdir("/");
+        NSMutableArray *toInject = [NSMutableArray new];
+        NSDictionary *files = tar.files;
+        magic_t cookie = magic_open(MAGIC_MIME_TYPE);
+        LOG("Opened magic");
+        NSString *magicFile = pathForResource(@"macho.mgc");
+        LOG("MagicFile: %@", magicFile);
+        if (cookie && magic_load(cookie, magicFile.UTF8String)==0) {
+            LOG("Opened magic");
+            const char *magic=NULL;
+            for (NSString *file in files.allKeys) {
+                mode_t mode = [files[file][@"mode"] integerValue];
+                if (!S_ISDIR(mode)) {
+                    if ((magic = magic_file(cookie, file.UTF8String)))
+                    {
+                        LOG("%@: %s", file, magic);
+                        if (strcmp(magic, "application/x-mach-binary")==0) {
+                            [toInject addObject:file];
+                        }
+                    }
+                }
+            }
+        } else {
+            LOG("Error opening or loading magic");
+        }
+        magic_close(cookie);
+        LOG("Injecting %lu files for %@", (unsigned long)toInject.count, debPath);
+        if (toInject.count > 0) {
+            injectTrustCache(toInject, GETOFFSET(trustcache));
+        }
+    }
+    return result;
 }
 
 bool extractDebs(NSArray <NSString *> *debPaths) {
@@ -591,31 +655,34 @@ bool machineNameContains(const char *string) {
 #define AF_MULTIPATH 39
 
 bool multi_path_tcp_enabled() {
-    bool rv = false;
-    int sock = socket(AF_MULTIPATH, SOCK_STREAM, 0);
-    if (sock < 0) {
-        return rv;
-    }
-    struct sockaddr* sockaddr_src = malloc(sizeof(struct sockaddr));
-    memset(sockaddr_src, 'A', sizeof(struct sockaddr));
-    sockaddr_src->sa_len = sizeof(struct sockaddr);
-    sockaddr_src->sa_family = AF_INET6;
-    struct sockaddr* sockaddr_dst = malloc(sizeof(struct sockaddr));
-    memset(sockaddr_dst, 'A', sizeof(struct sockaddr));
-    sockaddr_dst->sa_len = sizeof(struct sockaddr);
-    sockaddr_dst->sa_family = AF_INET;
-    sa_endpoints_t eps = {0};
-    eps.sae_srcif = 0;
-    eps.sae_srcaddr = sockaddr_src;
-    eps.sae_srcaddrlen = sizeof(struct sockaddr);
-    eps.sae_dstaddr = sockaddr_dst;
-    eps.sae_dstaddrlen = sizeof(struct sockaddr);
-    connectx(sock, &eps, SAE_ASSOCID_ANY, 0, NULL, 0, NULL, NULL);
-    rv = (errno != EPERM);
-    free(sockaddr_src);
-    free(sockaddr_dst);
-    close(sock);
-    return rv;
+    static bool enabled = false;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        int sock = socket(AF_MULTIPATH, SOCK_STREAM, 0);
+        if (sock < 0) {
+            return;
+        }
+        struct sockaddr* sockaddr_src = malloc(sizeof(struct sockaddr));
+        memset(sockaddr_src, 'A', sizeof(struct sockaddr));
+        sockaddr_src->sa_len = sizeof(struct sockaddr);
+        sockaddr_src->sa_family = AF_INET6;
+        struct sockaddr* sockaddr_dst = malloc(sizeof(struct sockaddr));
+        memset(sockaddr_dst, 'A', sizeof(struct sockaddr));
+        sockaddr_dst->sa_len = sizeof(struct sockaddr);
+        sockaddr_dst->sa_family = AF_INET;
+        sa_endpoints_t eps = {0};
+        eps.sae_srcif = 0;
+        eps.sae_srcaddr = sockaddr_src;
+        eps.sae_srcaddrlen = sizeof(struct sockaddr);
+        eps.sae_dstaddr = sockaddr_dst;
+        eps.sae_dstaddrlen = sizeof(struct sockaddr);
+        connectx(sock, &eps, SAE_ASSOCID_ANY, 0, NULL, 0, NULL, NULL);
+        enabled = (errno != EPERM);
+        free(sockaddr_src);
+        free(sockaddr_dst);
+        close(sock);
+    });
+    return enabled;
 }
 
 bool jailbreakEnabled() {
@@ -1119,3 +1186,70 @@ bool restartSpringBoard() {
     }
     return true;
 }
+
+bool uninstallRootLessJB() {
+    BOOL foundRootLessJB = NO;
+    NSFileManager *fileManager = [NSFileManager defaultManager];
+    NSString *rootLessJBBootstrapMarkerFile = @"/var/containers/Bundle/.installed_rootlessJB3";
+    NSArray *rootLessJBFileList = @[@"/var/LIB", @"/var/ulb", @"/var/bin", @"/var/sbin", @"/var/libexec", @"/var/containers/Bundle/tweaksupport/Applications", @"/var/Apps", @"/var/profile", @"/var/motd", @"/var/dropbear", @"/var/containers/Bundle/tweaksupport", @"/var/containers/Bundle/iosbinpack64", @"/var/log/testbin.log", @"/var/log/jailbreakd-stdout.log", @"/var/log/jailbreakd-stderr.log", @"/var/log/pspawn_payload_xpcproxy.log", @"/var/lib", @"/var/etc", @"/var/usr", rootLessJBBootstrapMarkerFile];
+    if ([fileManager fileExistsAtPath:rootLessJBBootstrapMarkerFile]) {
+        LOG("Found RootLessJB.");
+        foundRootLessJB = YES;
+    }
+    if (foundRootLessJB) {
+        LOG("Uninstalling RootLessJB...");
+        for (NSString *file in rootLessJBFileList) {
+            if ([fileManager fileExistsAtPath:file] && ![fileManager removeItemAtPath:file error:nil]) {
+                LOG("Unable to remove file: %@", file);
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool verifyECID(NSString *ecid) {
+    CFStringRef value = MGCopyAnswer(kMGUniqueChipID);
+    if (value == nil) {
+        LOG("Unable to get ECID.");
+        return false;
+    }
+    if (![ecid isEqualToString:CFBridgingRelease(value)]) {
+        LOG("Unable to verify ECID.");
+        return false;
+    }
+    return true;
+}
+
+bool canOpen(const char *URL) {
+    __block bool canOpenURL = false;
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if ([[UIApplication sharedApplication] canOpenURL:[NSURL URLWithString:@(URL)]]) {
+            canOpenURL = true;
+        }
+        dispatch_semaphore_signal(semaphore);
+    });
+    dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+    return canOpenURL;
+}
+
+bool airplaneModeEnabled() {
+    struct sockaddr_in zeroAddress;
+    bzero(&zeroAddress, sizeof(zeroAddress));
+    zeroAddress.sin_len = sizeof(zeroAddress);
+    zeroAddress.sin_family = AF_INET;
+    SCNetworkReachabilityRef reachability = SCNetworkReachabilityCreateWithAddress(kCFAllocatorDefault, (const struct sockaddr *)&zeroAddress);
+    if (reachability == NULL)
+        return false;
+    SCNetworkReachabilityFlags flags;
+    if (!SCNetworkReachabilityGetFlags(reachability, &flags)) {
+        return false;
+    }
+    if (flags == 0) {
+        return true;
+    } else {
+        return false;
+    }
+}
+

@@ -121,6 +121,10 @@ bool modifyPlist(NSString *filename, void (^function)(id));
 void list(NSString *directory);
 bool canRead(const char *file);
 bool restartSpringBoard(void);
+bool uninstallRootLessJB(void);
+bool verifyECID(NSString *ecid);
+bool canOpen(const char *URL);
+bool airplaneModeEnabled(void);
 
 extern NSData *lastSystemOutput;
 

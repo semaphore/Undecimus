@@ -409,7 +409,6 @@ uint64_t early_rk64(uint64_t kaddr)
 bool vfs_sploit()
 {
     LOG("empty_list by @i41nbeer");
-    offsets_init();
 
     start_spinners();
     LOG("vfs_sploit");
@@ -1054,7 +1053,7 @@ bool vfs_sploit()
 
     LOG("done!");
 
-    LOG("use the functions in kmem.h to read and write kernel memory");
+    LOG("use the functions in KernelMemory.h to read and write kernel memory");
     LOG("tfp0 in there will stay alive once this process exits");
     LOG("keep hold of a send right to it; don't expect this exploit to work again without a reboot");
     return true;

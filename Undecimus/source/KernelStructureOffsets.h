@@ -67,11 +67,14 @@ enum kstruct_offset {
 
     /* struct host */
     KSTRUCT_OFFSET_HOST_SPECIAL,
-
+    
+    /* struct ucred */
+    KSTRUCT_OFFSET_UCRED_CR_UID,
+    KSTRUCT_OFFSET_UCRED_CR_LABEL,
+    
     KFREE_ADDR_OFFSET,
 };
 
 int koffset(enum kstruct_offset offset);
-void offsets_init(void);
 
 #endif
